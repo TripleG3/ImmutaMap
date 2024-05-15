@@ -8,7 +8,7 @@ Map various property types.
 Map attributes on properties.
 Make your own custom mappings and add them.
 
-[See Test Examples:](https://github.com/MichaelPuckett2/ImmutaMap/blob/master/ImmutaMap.Test/MapTests.cs)
+[See Test Examples:](https://github.com/TripleG3/ImmutapMap/blob/main/ImmutaMap.Test/TargetBuilderTests.cs)
 
 Examples:
 ```csharp
