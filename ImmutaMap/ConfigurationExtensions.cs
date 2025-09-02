@@ -89,4 +89,19 @@ public static partial class ConfigurationExtensions
         transform.Transformers.Add(typeMapping);
         return transform;
     }
+
+    /// <summary>
+    /// Adds a property to skip by expression. Normalizes name according to IgnoreCase flag.
+    /// </summary>
+    public static IConfiguration<TSource, TTarget> Skip<TSource, TTarget, TProp>(
+        this IConfiguration<TSource, TTarget> configuration,
+        Expression<Func<TSource, TProp>> sourceExpression)
+    {
+        if (sourceExpression.Body is MemberExpression m)
+        {
+            var name = m.Member.Name;
+            configuration.SkipPropertyNames.Add(name);
+        }
+        return configuration;
+    }
 }

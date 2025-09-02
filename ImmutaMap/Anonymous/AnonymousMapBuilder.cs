@@ -21,10 +21,11 @@ public class AnonymousMapBuilder
     private static dynamic InstantiateAnonymous<TSource, TTarget>(IConfiguration<TSource, TTarget> map, TSource source)
     {
         var sourcePropertyInfos = source == null
-            ? typeof(TSource).GetType().GetProperties(PropertyBindingFlag)
+            ? typeof(TSource).GetProperties(PropertyBindingFlag)
             : source.GetType().GetProperties(PropertyBindingFlag);
         dynamic target = new ExpandoObject();
-        foreach (var propertyInfo in sourcePropertyInfos.Where(x => !map.SkipPropertyNames.Contains(x.Name)))
+    var comparer = map.IgnoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+    foreach (var propertyInfo in sourcePropertyInfos.Where(x => !map.SkipPropertyNames.Contains(x.Name, comparer)))
         {
             ((IDictionary<string, object?>)target).Add(propertyInfo.Name, propertyInfo.GetValue(source));
         }

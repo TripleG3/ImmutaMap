@@ -13,7 +13,7 @@ public class TargetAttributeTransformer<TAttribute> : ITransformer where TAttrib
     /// <inheritdoc />
     public bool TryGetValue<TSource>(TSource source, PropertyInfo sourcePropertyInfo, PropertyInfo targetPropertyInfo, out object result)
     {
-        var attribute = targetPropertyInfo.GetCustomAttribute<TAttribute>();
+    var attribute = (TAttribute?)MappingPlanCache.GetCachedAttribute(targetPropertyInfo, typeof(TAttribute));
         if (attribute != null)
         {
             result = func.Invoke(attribute, sourcePropertyInfo.GetValue(source)!);
@@ -29,7 +29,7 @@ public class TargetAttributeTransformer<TAttribute> : ITransformer where TAttrib
     /// <inheritdoc />
     public bool TryGetValue<TSource>(TSource source, PropertyInfo sourcePropertyInfo, PropertyInfo targetPropertyInfo, object previouslyMappedValue, out object result)
     {
-        var attribute = targetPropertyInfo.GetCustomAttribute<TAttribute>();
+    var attribute = (TAttribute?)MappingPlanCache.GetCachedAttribute(targetPropertyInfo, typeof(TAttribute));
         if (attribute != null)
         {
             result = func.Invoke(attribute, previouslyMappedValue);

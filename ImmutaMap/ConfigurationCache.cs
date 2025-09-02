@@ -1,21 +1,27 @@
 ﻿namespace ImmutaMap;
 
+using System.Collections.Concurrent;
+
+/// <summary>
+/// Thread-safe cache for configurations keyed by (sourceType, targetType)
+/// </summary>
 internal static class ConfigurationCache
 {
-    private static readonly Dictionary<(Type SourceType, Type TargetType), object> Cache = new();
+    private static readonly ConcurrentDictionary<(Type SourceType, Type TargetType), object> Cache = new();
 
     public static bool TryGetConfiguration<TSource, TTarget>(out IConfiguration<TSource, TTarget>? configuration)
     {
-        var key = (typeof(TSource), typeof(TTarget));
-        configuration = Cache.TryGetValue(key, out var value)
-                      ? value as IConfiguration<TSource, TTarget>
-                      : null;
-        return configuration != null;
+        if (Cache.TryGetValue((typeof(TSource), typeof(TTarget)), out var value))
+        {
+            configuration = (IConfiguration<TSource, TTarget>)value;
+            return true;
+        }
+        configuration = null;
+        return false;
     }
 
     public static void Add<TSource, TTarget>(IConfiguration<TSource, TTarget> configuration)
     {
-        var key = (typeof(TSource), typeof(TTarget));
-        if (!Cache.ContainsKey(key)) Cache.Add(key, configuration);
+        Cache.TryAdd((typeof(TSource), typeof(TTarget)), configuration);
     }
 }

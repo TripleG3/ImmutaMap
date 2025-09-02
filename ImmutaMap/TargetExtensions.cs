@@ -97,7 +97,7 @@ public static partial class TargetExtensions
     /// <returns>Returns an instantiated T with the values from the object used as reference.</returns>
     public static T? To<T>(this object obj)
     {
-        return TargetBuilder.GetNewInstance().Build(Configuration<object, T>.Empty, obj);
+    return TargetBuilder.GetNewInstance().Build(new Configuration<object, T>(), obj);
     }
 
     /// <summary>
@@ -128,7 +128,7 @@ public static partial class TargetExtensions
 
     public static void Copy<TSource, TTarget>(this TTarget target, TSource source)
     {
-        TargetBuilder.GetNewInstance().ReverseCopy(Configuration<object, TTarget>.Empty, source!, target);
+    TargetBuilder.GetNewInstance().ReverseCopy(new Configuration<object, TTarget>(), source!, target);
     }
 
     public static void Copy<TSource, TTarget>(this TTarget target, TSource source, Action<Configuration<TSource, TTarget>> config)
@@ -143,7 +143,7 @@ public static partial class TargetExtensions
 {
     public static Task<T?> ToAsync<T>(this object obj)
     {
-        return AsyncTargetBuilder.GetNewInstance().BuildAsync(AsyncConfiguration<object, T>.Empty, obj);
+    return AsyncTargetBuilder.GetNewInstance().BuildAsync(new AsyncConfiguration<object, T>(), obj);
     }
 
     public static Task<TTarget?> ToAsync<TSource, TTarget>(this TSource source, Action<AsyncConfiguration<TSource, TTarget>> config)
@@ -155,7 +155,7 @@ public static partial class TargetExtensions
 
     public static Task CopyAsync<TSource, TTarget>(this TTarget target, TSource source)
     {
-        return AsyncTargetBuilder.GetNewInstance().ReverseCopyAsync(AsyncConfiguration<object, TTarget>.Empty, source!, target);
+    return AsyncTargetBuilder.GetNewInstance().ReverseCopyAsync(new AsyncConfiguration<object, TTarget>(), source!, target);
     }
 
     public static Task CopyAsync<TSource, TTarget>(this TTarget target, TSource source, Action<AsyncConfiguration<TSource, TTarget>> config)

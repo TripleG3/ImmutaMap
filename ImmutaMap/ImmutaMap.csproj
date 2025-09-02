@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFramework>net7.0</TargetFramework>
+		<TargetFramework>net9.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<WarningsAsErrors>Nullable</WarningsAsErrors>
@@ -9,11 +9,11 @@
 		<PackageLicenseFile>LICENSE</PackageLicenseFile>
 		<PackageTags>Automapper, Mapper, Map, IMap, Immutable, Attribute Map</PackageTags>
 		<Copyright>@2024</Copyright>
-		<PackageProjectUrl>https://github.com/MichaelPuckett2/ImmutaMap</PackageProjectUrl>
+		<PackageProjectUrl>https://github.com/TripleG3/ImmutapMap</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/TripleG3/ImmutapMap</RepositoryUrl>
 		<Company>TripleG3</Company>
 		<Authors>Michael Puckett, II</Authors>
-		<Version>9.1.10</Version>
+		<Version>9.2.0</Version>
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<RepositoryType>git</RepositoryType>
