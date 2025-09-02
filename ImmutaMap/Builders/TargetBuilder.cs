@@ -4,7 +4,7 @@ public class TargetBuilder
 {
     private const BindingFlags PropertyBindingFlag = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private readonly ITypeFormatter typeFormatter;
-    private readonly IDictionary<(Type, PropertyInfo), object> transformedValues = new Dictionary<(Type, PropertyInfo), object>();
+    // Removed persistent transformedValues dictionary to avoid per-map overhead when not needed.
 
     /// <summary>
     /// Initializes the Mapper with an ITypeFormatter.
@@ -41,8 +41,17 @@ public class TargetBuilder
         {
             return default;
         }
+        // Defer instantiation until we know whether a constructor fast path exists
+        var plan = MappingPlanCache.GetOrAddPlan(configuration);
+        var transformers = (configuration as ITransform)?.Transformers;
+        var hasTransformers = transformers != null && transformers.Count > 0;
+        if (!hasTransformers && plan.ConstructorFactory != null)
+        {
+            // Use compiled constructor directly
+            return (TTarget?)plan.ConstructorFactory(source!);
+        }
         var target = typeFormatter.GetInstance<TTarget>();
-        Copy(configuration, source, target);
+        CopyInternal(configuration, source, target, plan, hasTransformers, transformers);
         return target;
     }
 
@@ -69,82 +78,95 @@ public class TargetBuilder
 
     private void Copy<TSource, TTarget>(IConfiguration<TSource, TTarget> configuration, TSource source, TTarget target)
     {
-        MappingPlanCache.MappingPlan plan;
-        var dynamicObjectSource = typeof(TSource) == typeof(object);
-        if (!dynamicObjectSource)
-        {
-            plan = MappingPlanCache.GetOrAddPlan(configuration);
-        }
-        else
-        {
-            // We'll emulate original behavior using runtime source & target reflection each call.
-            plan = default;
-        }
+        // legacy entry still used by ReverseCopy or explicit builds with args
+        var plan = MappingPlanCache.GetOrAddPlan(configuration);
         var transformers = (configuration as ITransform)?.Transformers;
+        var hasTransformers = transformers != null && transformers.Count > 0;
+        CopyInternal(configuration, source, target, plan, hasTransformers, transformers);
+    }
+
+    private void CopyInternal<TSource, TTarget>(IConfiguration<TSource, TTarget> configuration, TSource source, TTarget target, MappingPlanCache.MappingPlan plan, bool hasTransformers, ICollection<ITransformer>? transformers)
+    {
+        var dynamicObjectSource = typeof(TSource) == typeof(object);
+        if (dynamicObjectSource) plan = default; // dynamic path rebuilds every call
+
 
         if (!dynamicObjectSource)
         {
-            foreach (var (sourcePropertyInfo, targetPropertyInfo) in plan.Pairs)
+            // Fast path: no transformers => straight compiled getter->setter copy without dictionary overhead.
+            if (!hasTransformers)
             {
-            object? finalValue = null;
-            var hasValue = false;
-
-            if (transformers != null && transformers.Count > 0)
-            {
-                foreach (var transformer in transformers)
+                // If a constructor factory was used earlier we would have returned; here we just copy into existing instance.
+                foreach (var pair in plan.Pairs)
                 {
-                    if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
-                    {
-                        if (transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, prev, out var transformedValue))
-                        {
-                            finalValue = transformedValue;
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = transformedValue;
-                            hasValue = true;
-                            break; // first transformer wins
-                        }
-                    }
-                    else if (transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, out var transformedValue))
-                    {
-                        finalValue = transformedValue;
-                        transformedValues[(typeof(TSource), sourcePropertyInfo)] = transformedValue;
-                        hasValue = true;
-                        break;
-                    }
+                    var value = pair.Getter(source!);
+                    // Value type safety & null handling identical to previous fallback logic.
+                    pair.Setter(target!, value);
                 }
+                return;
             }
 
-            if (!hasValue)
+            // Only allocate dictionary if transformers are present (captures previous transformedValues behavior).
+            var transformedValues = new Dictionary<PropertyInfo, object?>(plan.Pairs.Length);
+            foreach (var pair in plan.Pairs)
             {
-                if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+                var sourcePropertyInfo = pair.Source;
+                var targetPropertyInfo = pair.Target;
+                object? finalValue = null;
+                var hasValue = false;
+                if (hasTransformers)
                 {
-                    finalValue = prev;
+            foreach (var transformer in transformers!)
+                    {
+                        if (transformedValues.TryGetValue(sourcePropertyInfo, out var prev))
+                        {
+                if (prev != null && transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, prev, out var transformedValue))
+                            {
+                                finalValue = transformedValue;
+                                transformedValues[sourcePropertyInfo] = transformedValue;
+                                hasValue = true;
+                                break;
+                            }
+                        }
+                        else if (transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, out var transformedValue))
+                        {
+                            finalValue = transformedValue;
+                            transformedValues[sourcePropertyInfo] = transformedValue;
+                            hasValue = true;
+                            break;
+                        }
+                    }
                 }
-                else
+                if (!hasValue)
                 {
-                    if (typeof(TSource) != typeof(TTarget)
-                        && sourcePropertyInfo.PropertyType == typeof(TSource)
-                        && targetPropertyInfo.PropertyType == typeof(TTarget))
+                    if (transformedValues.TryGetValue(sourcePropertyInfo, out var prev))
+                    {
+                        finalValue = prev;
+                    }
+                    else if (typeof(TSource) != typeof(TTarget) && sourcePropertyInfo.PropertyType == typeof(TSource) && targetPropertyInfo.PropertyType == typeof(TTarget))
                     {
                         finalValue = GetNewInstance().Build(configuration, source);
                     }
                     else
                     {
-                        finalValue = sourcePropertyInfo.GetValue(source);
+                        finalValue = pair.Getter(source!);
                     }
                 }
-            }
-
-            if (finalValue == null && sourcePropertyInfo.CanRead)
-            {
-                var fallback = sourcePropertyInfo.GetValue(source);
-                if (fallback != null) finalValue = fallback;
-            }
-                if (finalValue == null && sourcePropertyInfo.CanRead)
+                if (finalValue == null)
                 {
-                    var fallback = sourcePropertyInfo.GetValue(source);
+                    var fallback = pair.Getter(source!);
                     if (fallback != null) finalValue = fallback;
                 }
-                SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+                // Use compiled setter; fallback SetTargetValue logic for type safety.
+                if (finalValue != null && !targetPropertyInfo.PropertyType.IsAssignableFrom(finalValue.GetType()))
+                {
+                    SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+                }
+                else
+                {
+                    pair.Setter(target!, finalValue);
+                }
+                transformedValues[targetPropertyInfo] = finalValue!;
             }
             return;
         }
@@ -157,19 +179,21 @@ public class TargetBuilder
         var joinedPropertyInfos = GetSourceResultProperties(sourceProps, targetProps, configuration);
         AddPropertyNameMaps(configuration, sourceProps, targetProps, joinedPropertyInfos);
 
+        Dictionary<PropertyInfo, object?>? transformedValuesDyn = hasTransformers ? new() : null;
+
         foreach (var (sourcePropertyInfo, targetPropertyInfo) in joinedPropertyInfos)
         {
             var isTransformed = false;
             var transform = configuration as ITransform;
-            if (transform != null && transform.Transformers.Count > 0)
+            if (hasTransformers)
             {
-                foreach (var transformer in transform.Transformers)
+                foreach (var transformer in transform!.Transformers)
                 {
-                    if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prevVal))
+            if (transformedValuesDyn!.TryGetValue(sourcePropertyInfo, out var prevVal) && prevVal != null)
                     {
                         if (transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, prevVal, out var transformedValue))
                         {
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = transformedValue;
+                transformedValuesDyn[sourcePropertyInfo] = transformedValue;
                             SetTargetValue(target, targetPropertyInfo, transformedValue, configuration);
                             isTransformed = true;
                             break;
@@ -177,7 +201,7 @@ public class TargetBuilder
                     }
                     else if (transformer.TryGetValue(source, sourcePropertyInfo, targetPropertyInfo, out var transformedValue))
                     {
-                        transformedValues[(typeof(TSource), sourcePropertyInfo)] = transformedValue;
+            transformedValuesDyn[sourcePropertyInfo] = transformedValue;
                         SetTargetValue(target, targetPropertyInfo, transformedValue, configuration);
                         isTransformed = true;
                         break;
@@ -186,7 +210,7 @@ public class TargetBuilder
             }
             if (!isTransformed)
             {
-                if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+        if (hasTransformers && transformedValuesDyn!.TryGetValue(sourcePropertyInfo, out var prev))
                 {
                     SetTargetValue(target, targetPropertyInfo, prev, configuration);
                 }
@@ -223,7 +247,7 @@ public class TargetBuilder
             backingField?.SetValue(target, targetValue);
         }
 
-        transformedValues[(typeof(TTarget), targetPropertyInfo)] = targetValue!;
+    // No persistent dictionary anymore; per-call transformed tracking only when transformers present.
     }
 
     private static void AddPropertyNameMaps<TSource, TResult>(IConfiguration<TSource, TResult> configuration, List<PropertyInfo> sourceProperties, List<PropertyInfo> resultProperties, List<(PropertyInfo sourcePropertyInfo, PropertyInfo resultPropertyInfo)> joinedPropertyInfos)

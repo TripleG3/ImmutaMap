@@ -476,13 +476,7 @@ public class TargetBuilderTests
         {
             config.MapName(x => x.Counter, x => x.Count)
                   .MapName(x => x.Item_2, x => x.Item2);
-            config.MapTypeAsync<string>(async str =>
-            {
-                await Task.Delay(1);
-                str = str.ToUpper();
-                await Task.Delay(1);
-                return str;
-            });
+            config.MapTypeAsync<string>(str => Task.FromResult<object?>(str.ToUpper()));
         });
 
         //Assert

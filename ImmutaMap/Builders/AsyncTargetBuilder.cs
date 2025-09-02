@@ -4,7 +4,7 @@ public class AsyncTargetBuilder
 {
     private const BindingFlags PropertyBindingFlag = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private readonly ITypeFormatter typeFormatter;
-    private readonly IDictionary<(Type, PropertyInfo), object> transformedValues = new Dictionary<(Type, PropertyInfo), object>();
+    // Removed always-on transformedValues; allocate only when async transformers present.
 
     /// <summary>
     /// Initializes the Mapper with an ITypeFormatter.
@@ -69,36 +69,36 @@ public class AsyncTargetBuilder
 
     private async Task<TTarget> CopyAsync<TSource, TTarget>(IConfiguration<TSource, TTarget> configuration, TSource source, TTarget target)
     {
-        MappingPlanCache.MappingPlan plan;
         var dynamicObjectSource = typeof(TSource) == typeof(object);
-        if (!dynamicObjectSource)
-        {
-            plan = MappingPlanCache.GetOrAddPlan(configuration);
-        }
-        else
-        {
-            plan = default;
-        }
-        var asyncTransformers = (configuration as ITransformAsync)?.AsyncTransformers;
+        var plan = dynamicObjectSource ? default : MappingPlanCache.GetOrAddPlan(configuration);
+    var asyncTransformers = (configuration as ITransformAsync)?.AsyncTransformers;
+    var hasAsyncTransformers = asyncTransformers != null && asyncTransformers.Count > 0;
 
         if (!dynamicObjectSource)
         {
-            foreach (var (sourcePropertyInfo, targetPropertyInfo) in plan.Pairs)
+            // Async fast path: no async transformers => use sync builder with compiled plan.
+            if (!hasAsyncTransformers)
             {
+                var syncBuilder = TargetBuilder.GetNewInstance();
+                var syncResult = syncBuilder.Build(configuration, source);
+                return syncResult == null ? target : syncResult;
+            }
+            var transformedValues = hasAsyncTransformers ? new Dictionary<PropertyInfo, object?>(plan.Pairs.Length) : null;
+            foreach (var pair in plan.Pairs)
+            {
+                var sourcePropertyInfo = pair.Source;
+                var targetPropertyInfo = pair.Target;
                 object? finalValue = null;
                 var hasValue = false;
-
-            if (asyncTransformers != null && asyncTransformers.Count > 0)
-            {
-                foreach (var transformer in asyncTransformers)
+                foreach (var transformer in asyncTransformers!)
                 {
-                    if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+                    if (transformedValues!.TryGetValue(sourcePropertyInfo, out var prev) && prev != null)
                     {
                         var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo, prev);
                         if (boolItem.BooleanValue)
                         {
                             finalValue = boolItem.Item;
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
+                            transformedValues[sourcePropertyInfo] = boolItem.Item;
                             hasValue = true;
                             break;
                         }
@@ -109,41 +109,41 @@ public class AsyncTargetBuilder
                         if (boolItem.BooleanValue)
                         {
                             finalValue = boolItem.Item;
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
+                transformedValues![sourcePropertyInfo] = boolItem.Item;
                             hasValue = true;
                             break;
                         }
                     }
                 }
-            }
-
-            if (!hasValue)
-            {
-                if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+                if (!hasValue)
                 {
-                    finalValue = prev;
-                }
-                else
-                {
-                    if (typeof(TSource) != typeof(TTarget)
-                        && sourcePropertyInfo.PropertyType == typeof(TSource)
-                        && targetPropertyInfo.PropertyType == typeof(TTarget))
+                    if (transformedValues!.TryGetValue(sourcePropertyInfo, out var prev) && prev != null)
+                    {
+                        finalValue = prev;
+                    }
+                    else if (typeof(TSource) != typeof(TTarget) && sourcePropertyInfo.PropertyType == typeof(TSource) && targetPropertyInfo.PropertyType == typeof(TTarget))
                     {
                         finalValue = await GetNewInstance().BuildAsync(configuration, source);
                     }
                     else
                     {
-                        finalValue = sourcePropertyInfo.GetValue(source);
+                        finalValue = pair.Getter(source!);
                     }
                 }
-            }
-
-                if (finalValue == null && sourcePropertyInfo.CanRead)
+                if (finalValue == null)
                 {
-                    var fallback = sourcePropertyInfo.GetValue(source);
+                    var fallback = pair.Getter(source!);
                     if (fallback != null) finalValue = fallback;
                 }
-                SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+                if (finalValue != null && !targetPropertyInfo.PropertyType.IsAssignableFrom(finalValue.GetType()))
+                {
+                    SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+                }
+                else
+                {
+                    pair.Setter(target!, finalValue);
+                }
+                transformedValues![targetPropertyInfo] = finalValue!;
             }
             return target;
         }
@@ -156,20 +156,21 @@ public class AsyncTargetBuilder
         var joinedPropertyInfos = GetSourceResultProperties(sourceProps, targetProps, configuration);
         AddPropertyNameMaps(configuration, sourceProps, targetProps, joinedPropertyInfos);
 
+        var transformedValuesDyn = hasAsyncTransformers ? new Dictionary<PropertyInfo, object?>() : null;
         foreach (var (sourcePropertyInfo, targetPropertyInfo) in joinedPropertyInfos)
         {
             var isTransformed = false;
             var transform = configuration as ITransformAsync;
-            if (transform != null && transform.AsyncTransformers.Count > 0)
+            if (hasAsyncTransformers)
             {
-                foreach (var transformer in transform.AsyncTransformers)
+                foreach (var transformer in transform!.AsyncTransformers)
                 {
-                    if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+            if (transformedValuesDyn!.TryGetValue(sourcePropertyInfo, out var prev) && prev != null)
                     {
                         var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo, prev);
                         if (boolItem.BooleanValue)
                         {
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
+                transformedValuesDyn[sourcePropertyInfo] = boolItem.Item;
                             SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
                             isTransformed = true;
                             break;
@@ -180,7 +181,7 @@ public class AsyncTargetBuilder
                         var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo);
                         if (boolItem.BooleanValue)
                         {
-                            transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
+                transformedValuesDyn[sourcePropertyInfo] = boolItem.Item;
                             SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
                             isTransformed = true;
                             break;
@@ -190,7 +191,7 @@ public class AsyncTargetBuilder
             }
             if (!isTransformed)
             {
-                if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prevVal))
+        if (hasAsyncTransformers && transformedValuesDyn!.TryGetValue(sourcePropertyInfo, out var prevVal))
                 {
                     SetTargetValue(target, targetPropertyInfo, prevVal, configuration);
                 }
@@ -203,69 +204,6 @@ public class AsyncTargetBuilder
         }
 
         return target;
-    }
-
-    private async Task<bool> RunAsyncTransformersAsync<TSource, TTarget>(IConfiguration<TSource, TTarget> configuration, TSource source, TTarget target, PropertyInfo sourcePropertyInfo, PropertyInfo targetPropertyInfo, bool isTransformed)
-    {
-        if (configuration is ITransformAsync transformAsync)
-        {
-            foreach (var transformer in transformAsync.AsyncTransformers)
-            {
-                var previouslyTransformedValue = transformedValues.ContainsKey((typeof(TSource), sourcePropertyInfo))
-                    ? transformedValues[(typeof(TSource), sourcePropertyInfo)]
-                    : default;
-
-                if (transformedValues.ContainsKey((typeof(TSource), sourcePropertyInfo)))
-                {
-                    var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo, transformedValues[(typeof(TSource), sourcePropertyInfo)]);
-                    if (boolItem.BooleanValue)
-                    {
-                        transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
-                        SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
-                        isTransformed = true;
-                    }
-                }
-                else
-                {
-                    var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo);
-                    if (boolItem.BooleanValue)
-                    {
-                        transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
-                        SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
-                        isTransformed = true;
-                    }
-                }
-            }
-        }
-
-        if (!isTransformed)
-        {
-            var previouslyTransformedValue = transformedValues.ContainsKey((typeof(TSource), sourcePropertyInfo))
-                ? transformedValues[(typeof(TSource), sourcePropertyInfo)]
-                : default;
-
-            if (previouslyTransformedValue != default)
-            {
-                SetTargetValue(target, targetPropertyInfo, previouslyTransformedValue, configuration);
-            }
-            else
-            {
-                object? targetValue;
-                if (typeof(TSource) != typeof(TTarget)
-                && sourcePropertyInfo.PropertyType == typeof(TSource)
-                && targetPropertyInfo.PropertyType == typeof(TTarget))
-                {
-                    targetValue = await GetNewInstance().BuildAsync(configuration, source);
-                }
-                else
-                {
-                    targetValue = sourcePropertyInfo.GetValue(source)!;
-                }
-                SetTargetValue(target, targetPropertyInfo, targetValue, configuration);
-            }
-        }
-
-        return isTransformed;
     }
 
     private void SetTargetValue<TSource, TTarget>(TTarget target, PropertyInfo targetPropertyInfo, object? targetValue, IConfiguration<TSource, TTarget> configuration)
@@ -290,7 +228,7 @@ public class AsyncTargetBuilder
             backingField?.SetValue(target, targetValue);
         }
 
-        transformedValues[(typeof(TTarget), targetPropertyInfo)] = targetValue!;
+    // per-call transformed values dictionary handled in calling code only when async transformers are present.
     }
 
     private static void AddPropertyNameMaps<TSource, TResult>(IConfiguration<TSource, TResult> configuration, List<PropertyInfo> sourceProperties, List<PropertyInfo> resultProperties, List<(PropertyInfo sourcePropertyInfo, PropertyInfo resultPropertyInfo)> joinedPropertyInfos)
