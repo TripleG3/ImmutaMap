@@ -1,4 +1,6 @@
 ﻿using ImmutaMap.Builders;
+using System.Collections.Concurrent;
+using System.Reflection;
 
 namespace ImmutaMap;
 
@@ -68,9 +70,39 @@ public static partial class TargetExtensions
                                                  Expression<Func<T, TSourcePropertyType>> sourceExpression,
                                                  Func<TSourcePropertyType, TSourcePropertyType> valueFunc)
     {
+        if (t == null) return default;
+        // Fast path: single property update without full mapping pipeline.
+        if (sourceExpression.Body is MemberExpression me && me.Member is PropertyInfo pi)
+        {
+            var access = AccessorCache<T>.GetOrAdd(pi);
+            if (access.Setter != null && access.Getter != null)
+            {
+                var originalValueObj = access.Getter(t!);
+                // If getter failed just fallback
+                if (originalValueObj is TSourcePropertyType originalValue)
+                {
+                    var newValue = valueFunc(originalValue);
+                    // If unchanged, return original to avoid clone cost.
+                    if (EqualityComparer<TSourcePropertyType>.Default.Equals(originalValue, newValue))
+                        return t;
+                    var clone = ClonerCache<T>.Clone(t!);
+                    try
+                    {
+                        access.Setter(clone!, newValue!);
+                        return clone;
+                    }
+                    catch
+                    {
+                        // Fallback on any assignment issue
+                    }
+                }
+            }
+        }
+        // Fallback to legacy mapping path if expression not simple property or any cache issue.
         var configuration = new Configuration<T, T>();
-        configuration!.MapPropertyType(sourceExpression, (value) => valueFunc.Invoke(sourceExpression.Compile().Invoke(t))!);
-        return TargetBuilder.GetNewInstance().Build(configuration, t); 
+        var compiled = sourceExpression.Compile();
+        configuration.MapPropertyType(sourceExpression, _ => valueFunc(compiled(t!))!);
+        return TargetBuilder.GetNewInstance().Build(configuration, t);
     }
 
     /// <summary>
@@ -168,5 +200,49 @@ public static partial class TargetExtensions
         var configuration = new AsyncConfiguration<TSource, TTarget>();
         config.Invoke(configuration);
         return AsyncTargetBuilder.GetNewInstance().ReverseCopyAsync(configuration, source!, target);
+    }
+}
+
+// Internal caches for fast With<> single property updates.
+internal static class AccessorCache<T>
+{
+    private static readonly ConcurrentDictionary<string, (Func<T, object?> Getter, Action<T, object?>? Setter)> Cache = new();
+
+    public static (Func<T, object?> Getter, Action<T, object?>? Setter) GetOrAdd(PropertyInfo pi)
+    {
+        return Cache.GetOrAdd(pi.Name, _ => Build(pi));
+    }
+
+    private static (Func<T, object?> Getter, Action<T, object?>? Setter) Build(PropertyInfo pi)
+    {
+        var instance = Expression.Parameter(typeof(T), "i");
+        Expression body = Expression.Property(pi.GetMethod!.IsStatic ? null : instance, pi);
+        var boxed = Expression.Convert(body, typeof(object));
+        var getter = Expression.Lambda<Func<T, object?>>(boxed, instance).Compile();
+
+        Action<T, object?>? setter = null;
+        if (pi.CanWrite)
+        {
+            var valueParam = Expression.Parameter(typeof(object), "v");
+            var cast = Expression.Convert(valueParam, pi.PropertyType);
+            var assign = Expression.Assign(Expression.Property(instance, pi), cast);
+            setter = Expression.Lambda<Action<T, object?>>(assign, instance, valueParam).Compile();
+        }
+        return (getter, setter);
+    }
+}
+
+internal static class ClonerCache<T>
+{
+    private static readonly Func<T, T> Cloner = Build();
+    public static T Clone(T source) => Cloner(source);
+
+    private static Func<T, T> Build()
+    {
+        var method = typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var p = Expression.Parameter(typeof(T), "s");
+        var call = Expression.Call(Expression.Convert(p, typeof(object)), method);
+        var cast = Expression.Convert(call, typeof(T));
+        return Expression.Lambda<Func<T, T>>(cast, p).Compile();
     }
 }
