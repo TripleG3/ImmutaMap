@@ -83,8 +83,12 @@ public class AsyncTargetBuilder
 
         if (!dynamicObjectSource)
         {
-            foreach (var (sourcePropertyInfo, targetPropertyInfo) in plan.Pairs)
+            var pairs = plan.Pairs;
+            var getters = plan.SourceGetters;
+            var setters = plan.TargetSetters;
+            for (int i = 0; i < pairs.Length; i++)
             {
+                var (sourcePropertyInfo, targetPropertyInfo) = pairs[i];
                 object? finalValue = null;
                 var hasValue = false;
 
@@ -117,61 +121,78 @@ public class AsyncTargetBuilder
                 }
             }
 
-            if (!hasValue)
-            {
-                if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
+                if (!hasValue)
                 {
-                    finalValue = prev;
-                }
-                else
-                {
-                    if (typeof(TSource) != typeof(TTarget)
-                        && sourcePropertyInfo.PropertyType == typeof(TSource)
-                        && targetPropertyInfo.PropertyType == typeof(TTarget))
+                    if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
                     {
-                        finalValue = await GetNewInstance().BuildAsync(configuration, source);
+                        finalValue = prev;
                     }
                     else
                     {
-                        finalValue = sourcePropertyInfo.GetValue(source);
+                        if (typeof(TSource) != typeof(TTarget)
+                            && sourcePropertyInfo.PropertyType == typeof(TSource)
+                            && targetPropertyInfo.PropertyType == typeof(TTarget))
+                        {
+                            finalValue = await GetNewInstance().BuildAsync(configuration, source);
+                        }
+                        else
+                        {
+                            var getter = (Func<TSource, object?>)getters[i];
+                            finalValue = getter(source);
+                        }
                     }
                 }
-            }
 
                 if (finalValue == null && sourcePropertyInfo.CanRead)
                 {
-                    var fallback = sourcePropertyInfo.GetValue(source);
+                    var getter = (Func<TSource, object?>)getters[i];
+                    var fallback = getter(source);
                     if (fallback != null) finalValue = fallback;
                 }
-                SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+
+                if (setters[i] is Action<TTarget, object?> setter && targetPropertyInfo.CanWrite)
+                {
+                    if (finalValue != null && !targetPropertyInfo.PropertyType.IsAssignableFrom(finalValue.GetType()))
+                    {
+                        if (!configuration.WillNotThrowExceptions)
+                            throw new BuildException(finalValue.GetType(), targetPropertyInfo);
+                        continue;
+                    }
+                    setter(target, finalValue);
+                    transformedValues[(typeof(TTarget), targetPropertyInfo)] = finalValue!;
+                }
+                else
+                {
+                    SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+                }
             }
             return target;
         }
 
-        // Dynamic path
+        // Dynamic path with runtime plan caching
         if (source == null) return target;
-        var skipSet = configuration.SkipPropertyNames;
-        var sourceProps = source.GetType().GetProperties(PropertyBindingFlag).Where(p => !skipSet.Contains(p.Name)).ToList();
-        var targetProps = typeof(TTarget).GetProperties(PropertyBindingFlag).Where(p => !skipSet.Contains(p.Name)).ToList();
-        var joinedPropertyInfos = GetSourceResultProperties(sourceProps, targetProps, configuration);
-        AddPropertyNameMaps(configuration, sourceProps, targetProps, joinedPropertyInfos);
-
-        foreach (var (sourcePropertyInfo, targetPropertyInfo) in joinedPropertyInfos)
+        var runtimePlan = MappingPlanCache.GetOrAddRuntimePlan(source.GetType(), (IConfiguration<object, TTarget>)configuration);
+        var pairsDyn = runtimePlan.Pairs;
+        var gettersDyn = runtimePlan.SourceGetters;
+        var settersDyn = runtimePlan.TargetSetters;
+        var asyncTrans = (configuration as ITransformAsync)?.AsyncTransformers;
+        for (int i = 0; i < pairsDyn.Length; i++)
         {
-            var isTransformed = false;
-            var transform = configuration as ITransformAsync;
-            if (transform != null && transform.AsyncTransformers.Count > 0)
+            var (sourcePropertyInfo, targetPropertyInfo) = pairsDyn[i];
+            object? finalValue = null;
+            var transformed = false;
+            if (asyncTrans != null && asyncTrans.Count > 0)
             {
-                foreach (var transformer in transform.AsyncTransformers)
+                foreach (var transformer in asyncTrans)
                 {
                     if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prev))
                     {
                         var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo, prev);
                         if (boolItem.BooleanValue)
                         {
+                            finalValue = boolItem.Item;
                             transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
-                            SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
-                            isTransformed = true;
+                            transformed = true;
                             break;
                         }
                     }
@@ -180,28 +201,42 @@ public class AsyncTargetBuilder
                         var boolItem = await transformer.GetValueAsync(source, sourcePropertyInfo, targetPropertyInfo);
                         if (boolItem.BooleanValue)
                         {
+                            finalValue = boolItem.Item;
                             transformedValues[(typeof(TSource), sourcePropertyInfo)] = boolItem.Item;
-                            SetTargetValue(target, targetPropertyInfo, boolItem.Item, configuration);
-                            isTransformed = true;
+                            transformed = true;
                             break;
                         }
                     }
                 }
             }
-            if (!isTransformed)
+            if (!transformed)
             {
                 if (transformedValues.TryGetValue((typeof(TSource), sourcePropertyInfo), out var prevVal))
                 {
-                    SetTargetValue(target, targetPropertyInfo, prevVal, configuration);
+                    finalValue = prevVal;
                 }
                 else
                 {
-                    var targetValue = sourcePropertyInfo.GetValue(source);
-                    SetTargetValue(target, targetPropertyInfo, targetValue, configuration);
+                    finalValue = gettersDyn[i](source!);
                 }
             }
+            if (settersDyn[i] != null && targetPropertyInfo.CanWrite)
+            {
+                var setter = settersDyn[i];
+                if (finalValue != null && !targetPropertyInfo.PropertyType.IsAssignableFrom(finalValue.GetType()))
+                {
+                    if (!configuration.WillNotThrowExceptions)
+                        throw new BuildException(finalValue.GetType(), targetPropertyInfo);
+                    continue;
+                }
+                setter(target!, finalValue);
+                transformedValues[(typeof(TTarget), targetPropertyInfo)] = finalValue!;
+            }
+            else
+            {
+                SetTargetValue(target, targetPropertyInfo, finalValue, configuration);
+            }
         }
-
         return target;
     }
 
@@ -293,41 +328,5 @@ public class AsyncTargetBuilder
         transformedValues[(typeof(TTarget), targetPropertyInfo)] = targetValue!;
     }
 
-    private static void AddPropertyNameMaps<TSource, TResult>(IConfiguration<TSource, TResult> configuration, List<PropertyInfo> sourceProperties, List<PropertyInfo> resultProperties, List<(PropertyInfo sourcePropertyInfo, PropertyInfo resultPropertyInfo)> joinedPropertyInfos)
-    {
-        foreach (var (sourcePropertyMapName, resultPropertyMapName) in configuration.PropertyNameMaps)
-        {
-            var sourcePropertyInfo = sourceProperties.FirstOrDefault(x => configuration.IgnoreCase ? x.Name.ToLowerInvariant() == sourcePropertyMapName.ToLowerInvariant() : x.Name == sourcePropertyMapName);
-            if (sourcePropertyInfo == null) continue;
-            var resultPropertyInfo = resultProperties.FirstOrDefault(x => configuration.IgnoreCase ? x.Name.ToLowerInvariant() == resultPropertyMapName.ToLowerInvariant() : x.Name == resultPropertyMapName);
-            if (resultPropertyInfo == null) continue;
-            if (joinedPropertyInfos.Any(x =>
-                configuration.IgnoreCase
-                ? x.sourcePropertyInfo.Name.ToLowerInvariant() == sourcePropertyMapName.ToLowerInvariant() && x.resultPropertyInfo.Name.ToLowerInvariant() == resultPropertyMapName.ToLowerInvariant()
-                : x.sourcePropertyInfo.Name == sourcePropertyMapName && x.resultPropertyInfo.Name == resultPropertyMapName))
-
-            {
-                continue;
-            }
-            var existingJoinedPropertyInfo = joinedPropertyInfos
-                .FirstOrDefault(x => x.sourcePropertyInfo.Name == sourcePropertyInfo.Name || x.resultPropertyInfo.Name == resultPropertyInfo.Name);
-            if (existingJoinedPropertyInfo != default)
-            {
-                joinedPropertyInfos.Remove(existingJoinedPropertyInfo);
-            }
-            joinedPropertyInfos.Add((sourcePropertyInfo, resultPropertyInfo));
-        }
-    }
-
-    private static List<(PropertyInfo sourceProperty, PropertyInfo resultProperty)>
-        GetSourceResultProperties<TSource, TTarget>(List<PropertyInfo> sourceProperties,
-                                                    List<PropertyInfo> targetProperties,
-                                                    IConfiguration<TSource, TTarget> configuration)
-    {
-        return sourceProperties.Join(targetProperties,
-            sourceProperty => configuration.IgnoreCase ? sourceProperty.Name.ToLowerInvariant() : sourceProperty.Name,
-            resultProperty => configuration.IgnoreCase ? resultProperty.Name.ToLowerInvariant() : resultProperty.Name,
-            (sourceProperty, resultProperty) => (sourceProperty, resultProperty))
-            .ToList();
-    }
+    // Removed legacy helper methods (AddPropertyNameMaps / GetSourceResultProperties); replaced with dictionary-based logic in CopyAsync.
 }

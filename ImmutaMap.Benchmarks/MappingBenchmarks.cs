@@ -38,7 +38,7 @@ public class MappingBenchmarks
 
     // 1. PersonRecord -> PersonClass
     [Benchmark]
-    public PersonClass Map_PersonRecord_To_PersonClass_Library() => _personRecord.To<PersonRecord, PersonClass>(_ => { })!;
+    public PersonClass Map_PersonRecord_To_PersonClass_Library() => _personRecord.To<PersonRecord, PersonClass>()!;
 
     [Benchmark]
     public PersonClass Map_PersonRecord_To_PersonClass_Manual() => ManualMapPersonRecordToPersonClass(_personRecord);
@@ -73,7 +73,7 @@ public class MappingBenchmarks
 
     // 5. List<MessageDto> select to Message with transform
     [Benchmark]
-    public List<Message> Map_MessageDto_List_Library() => _messages.Select(m => m.To<MessageDto, Message>(cfg => cfg.MapType<DateTime>(d => d.ToLocalTime()))!).ToList();
+    public List<Message> Map_MessageDto_List_Library() => [.. _messages.Select(m => m.To<MessageDto, Message>(cfg => cfg.MapType<DateTime>(d => d.ToLocalTime()))!)];
 
     [Benchmark]
     public List<Message> Map_MessageDto_List_Manual()
@@ -118,4 +118,19 @@ public class MappingBenchmarks
 
     private static PersonClass ManualMapPersonRecordToPersonClass(PersonRecord record) =>
         new(record.FirstName, record.LastName, record.Age);
+
+    private static readonly object DynamicPersonRecord = new PersonRecord("John", "Doe", 23);
+    private static readonly Configuration<object, PersonClass> DynamicConfig = new Configuration<object, PersonClass> { IgnoreCase = false };
+
+    [Benchmark]
+    public PersonClass Map_DynamicObject_To_PersonClass_FirstCall()
+    {
+        return DynamicPersonRecord.To<object, PersonClass>(_ => { })!; // uses runtime plan internally first time
+    }
+
+    [Benchmark]
+    public PersonClass Map_DynamicObject_To_PersonClass_Repeated()
+    {
+        return DynamicPersonRecord.To<object, PersonClass>(_ => { })!; // subsequent calls hit cache
+    }
 }

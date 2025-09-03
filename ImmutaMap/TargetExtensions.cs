@@ -114,6 +114,11 @@ public static partial class TargetExtensions
         return TargetBuilder.GetNewInstance().Build(configuration, source);
     }
 
+    public static TTarget? To<TSource, TTarget>(this TSource source)
+    {
+        return TargetBuilder.GetNewInstance().Build(Configuration<TSource, TTarget>.Empty, source);
+    }
+
     public static dynamic ToDynamic<T>(this T t)
     {
         return AnonymousMapBuilder.Build(Configuration<T, dynamic>.Empty, t);
