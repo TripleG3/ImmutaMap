@@ -2,6 +2,8 @@ name: Publish ImmutaMap to NuGet
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
       - 'V*'
@@ -57,6 +59,7 @@ jobs:
         run: dotnet pack ${{ env.PROJECT_PATH }} -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ steps.get_version.outputs.version }} --no-build --output ./artifacts
 
       - name: Publish to NuGet
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V') || github.event_name == 'workflow_dispatch'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
