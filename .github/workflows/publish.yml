@@ -2,35 +2,27 @@ name: Publish ImmutaMap to NuGet
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-      - 'V*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version override (optional, matches csproj if empty)'
-        required: false
-        type: string
+    branches: [ main ]
 
 permissions:
   contents: read
   packages: write
 
-env:
-  PROJECT_PATH: ImmutaMap/ImmutaMap.csproj
-  CONFIGURATION: Release
-  # NuGet API key stored as a repository secret named NUGET_API_KEY
-
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build-pack-publish:
+    runs-on: windows-latest
+    env:
+      PROJECT_PATH: ImmutaMap/ImmutaMap.csproj
+      NUGET_SOURCE: https://api.nuget.org/v3/index.json
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -38,41 +30,51 @@ jobs:
           dotnet-version: '9.0.x'
 
       - name: Restore
-        run: dotnet restore ${{ env.PROJECT_PATH }}
+        run: dotnet restore $PROJECT_PATH
 
-      - name: Determine Version
-        id: get_version
-        shell: bash
+      - name: Compute Version (no file modification)
+        id: version
+        shell: pwsh
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VERSION=${{ github.event.inputs.version }}
-          else
-            VERSION=$(grep -oP '(?<=<Version>)[^<]+' ${{ env.PROJECT_PATH }} | head -n1)
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Package version: $VERSION"
+          [xml]$xml = Get-Content $env:PROJECT_PATH
+          $base = $xml.Project.PropertyGroup.Version
+          if (-not $base) { Write-Error 'Could not read <Version> from csproj'; exit 1 }
+          $parts = $base.Split('.')
+          if ($parts.Length -lt 2) { Write-Error "Unexpected version format: $base"; exit 1 }
+          $major = $parts[0]
+          $minor = $parts[1]
+          $patch = $env:GITHUB_RUN_NUMBER
+          $newVersion = "$major.$minor.$patch"
+          Write-Host "Resolved ephemeral package version: $newVersion (base $base)"
+          "version=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Build
-        run: dotnet build ${{ env.PROJECT_PATH }} -c ${{ env.CONFIGURATION }} -p:ContinuousIntegrationBuild=true -p:Version=${{ steps.get_version.outputs.version }}
+      - name: Build (Release)
+        run: dotnet build $PROJECT_PATH -c Release -p:ContinuousIntegrationBuild=true -p:Version=${{ steps.version.outputs.version }} --no-restore
 
       - name: Pack
-        run: dotnet pack ${{ env.PROJECT_PATH }} -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ steps.get_version.outputs.version }} --no-build --output ./artifacts
-
-      - name: Publish to NuGet
-        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V') || github.event_name == 'workflow_dispatch'
+        run: dotnet pack $PROJECT_PATH -c Release --no-build -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg -p:ContinuousIntegrationBuild=true -p:Version=${{ steps.version.outputs.version }} -o ./artifacts
+      - name: Push to NuGet.org
+        if: success() && env.NUGET_SOURCE == 'https://api.nuget.org/v3/index.json'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
           if [ -z "$NUGET_API_KEY" ]; then
-            echo 'NUGET_API_KEY secret not set'; exit 1; fi
-          dotnet nuget push "./artifacts/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+            echo "NUGET_API_KEY secret not set; skipping push." >&2
+            exit 0
+          fi
+          set -e
+          echo "Packages in artifacts directory:" >&2
+          ls -1 artifacts || true
+          for pkg in artifacts/*.nupkg; do
+            [ -f "$pkg" ] || continue
+            echo "Pushing $pkg" >&2
+            dotnet nuget push $pkg --api-key "$NUGET_API_KEY" --source $NUGET_SOURCE --skip-duplicate --no-symbols
+          done
+          for sym in artifacts/*.snupkg; do
+            [ -f "$sym" ] || continue
+            echo "Pushing symbols $sym" >&2
+            dotnet nuget push $sym --api-key "$NUGET_API_KEY" --source $NUGET_SOURCE --skip-duplicate || true
+          done
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ImmutaMap ${{ steps.get_version.outputs.version }}
-          generate_release_notes: true
-          files: |
-            artifacts/*.nupkg
+  # NOTE: GitHub release creation intentionally removed. This workflow's
+  # sole responsibility is to build, pack and push packages to NuGet.org.
